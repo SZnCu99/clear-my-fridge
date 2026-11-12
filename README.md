@@ -11,6 +11,16 @@ Keep track of what's in your fridge and use things up before they expire.
 - Names are tidied (extra spaces removed) and must contain at least one letter
 - Data is saved in SQLite (`data/fridge.db`), so it survives a refresh or restart
 
+**Milestone 2** suggests meals from what's in the fridge:
+
+- Tap **Suggest meals** to get 3 recipes from your whole fridge (expired items are left out). Recipes that use
+  the most soon-to-expire items come first, and each shows what it uses from your fridge and anything you'd still need
+- **Not what you want? Tweak the ingredients you want to use first** opens a list where you untick items, then
+  suggests again using only the ticked ones
+- **Cook this** takes the recipe's amounts out of your fridge in one go, with an Undo
+- Suggestions come from Google's Gemini 3.1 Flash-Lite on the free tier, and only when you tap the button.
+  Only item names, amounts and expiry dates are sent
+
 Stack: React + Vite + Tailwind (installable PWA) and Node + Express + better-sqlite3.
 
 ## Run it
@@ -21,6 +31,17 @@ Needs Node 20 or newer.
 npm install
 npm run dev
 ```
+
+For meal suggestions, get a free API key at [Google AI Studio](https://aistudio.google.com) ("Get API key")
+and put it in a `.env` file in the project folder (it's git-ignored):
+
+```sh
+GEMINI_API_KEY=your-key
+# GEMINI_MODEL=gemini-3.1-flash-lite   (optional override)
+```
+
+Without a key everything else works and the Suggest button explains what's missing. Don't enable billing on the
+key's Google project if you want it to stay free: you'll get a "limit reached" message instead of a bill.
 
 This starts the API on port 3001 and the app on http://localhost:5173. To open it on your phone,
 connect to the same Wi-Fi and visit `http://<your-computer's-IP>:5173` (Vite prints the address).
@@ -48,6 +69,9 @@ a full install until it's served over HTTPS.
 | PATCH | `/api/items/:id` | any of `name`, `amount`, `unit`, `expires_on` |
 | POST | `/api/items/:id/use` | `{ all: true }`, `{ fraction: 0.5 }` or `{ amount: 200 }`; returns `{ item }`, `null` once it's all used |
 | DELETE | `/api/items/:id` | – |
+| POST | `/api/suggestions` | `{}` for the whole fridge, or `{ item_ids: [...] }`; returns `{ recipes: [{ title, minutes, uses: [{ id, name, amount, unit, ... }], missing, steps }], item_ids }` |
+| POST | `/api/cook` | `{ uses: [{ id, amount }] }`, all or nothing; returns `{ before, items }` |
+| POST | `/api/items/restore` | `{ items: [...] }` (the `before` rows from `/api/cook`) puts them back for Undo |
 
 If your database is from the first draft (free-text quantity), it's converted automatically on start-up:
 "500 g" becomes 500 g, and anything that can't be read becomes 1 pcs.

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, formatAmount, UNITS } from './api.js';
 import { expiryLabel, expiryStatus, formatDate, todayISO } from './dates.js';
+import { MealsView, PickView } from './Meals.jsx';
 
 const byExpiry = (a, b) =>
   a.expires_on.localeCompare(b.expires_on) ||
@@ -15,6 +16,10 @@ export default function App() {
   const [error, setError] = useState('');
   const [undo, setUndo] = useState(null);
   const undoTimer = useRef();
+  const [view, setView] = useState('fridge'); // fridge | meals | pick
+  // Last suggestions, kept while moving between screens so going back doesn't cost another call.
+  const [meals, setMeals] = useState({ loading: false, error: '', recipes: null, itemIds: null });
+  const suggestSeq = useRef(0);
 
   useEffect(() => {
     api.list().then(setItems).catch((e) => setError(e.message));
@@ -67,7 +72,33 @@ export default function App() {
     const { undoFn } = undo;
     setUndo(null);
     clearTimeout(undoTimer.current);
-    undoFn().catch(() => {});
+    run(undoFn).catch(() => {});
+  };
+
+  // itemIds: null for the whole fridge (mode 1), or the picked ids (mode 2).
+  const suggest = async (itemIds = null) => {
+    const seq = ++suggestSeq.current;
+    setView('meals');
+    setMeals({ loading: true, error: '', recipes: null, itemIds });
+    try {
+      const { recipes, item_ids } = await api.suggest(itemIds ?? undefined);
+      if (seq === suggestSeq.current) setMeals({ loading: false, error: '', recipes, itemIds: itemIds ? item_ids : null });
+    } catch (e) {
+      if (seq === suggestSeq.current) setMeals({ loading: false, error: e.message, recipes: null, itemIds });
+    }
+  };
+
+  const cook = async (recipe) => {
+    try {
+      const { before, items: updated } = await api.cook(recipe.uses.map((u) => ({ id: u.id, amount: u.amount })));
+      setItems(updated);
+      setMeals((m) => ({ ...m, recipes: null })); // amounts changed, so old suggestions are stale
+      setView('fridge');
+      showUndo(`Cooked ${recipe.title}`, async () => setItems(await api.restore(before)));
+    } catch (e) {
+      setMeals((m) => ({ ...m, error: e.message }));
+      throw e;
+    }
   };
 
   const expired = items?.filter((i) => expiryStatus(i.expires_on) === 'expired').length ?? 0;
@@ -84,29 +115,54 @@ export default function App() {
             {expired > 0 && <span className="font-medium text-red-700"> · {expired} expired</span>}
           </p>
         )}
+        {view === 'fridge' && items && items.some((i) => expiryStatus(i.expires_on) !== 'expired') && (
+          <button
+            onClick={() => (meals.recipes ? setView('meals') : suggest())}
+            className="mt-3 w-full rounded-lg bg-amber-500 px-4 py-2.5 font-semibold text-slate-900 hover:bg-amber-400"
+          >
+            {meals.recipes ? 'See meal suggestions' : 'Suggest meals'}
+          </button>
+        )}
       </header>
 
-      <AddForm onAdd={add} />
-
-      {error && (
-        <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">
-          {error}
-        </p>
+      {view === 'meals' && (
+        <MealsView
+          state={meals}
+          onBack={() => setView('fridge')}
+          onAgain={() => suggest(meals.itemIds)}
+          onTweak={() => setView('pick')}
+          onCook={cook}
+        />
+      )}
+      {view === 'pick' && items && (
+        <PickView items={items} initial={meals.itemIds} onBack={() => setView('meals')} onSuggest={suggest} />
       )}
 
-      <section className="mt-6" aria-label="Fridge items">
-        {items === null && !error && <p className="text-slate-500">Loading…</p>}
-        {items?.length === 0 && (
-          <p className="rounded-xl border border-dashed border-slate-300 px-4 py-8 text-center text-slate-500">
-            Your fridge list is empty. Add something above.
-          </p>
-        )}
-        <ul className="space-y-2">
-          {items?.map((item) => (
-            <ItemRow key={item.id} item={item} onSave={save} onUse={use} />
-          ))}
-        </ul>
-      </section>
+      {view === 'fridge' && (
+        <>
+          <AddForm onAdd={add} />
+
+          {error && (
+            <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">
+              {error}
+            </p>
+          )}
+
+          <section className="mt-6" aria-label="Fridge items">
+            {items === null && !error && <p className="text-slate-500">Loading…</p>}
+            {items?.length === 0 && (
+              <p className="rounded-xl border border-dashed border-slate-300 px-4 py-8 text-center text-slate-500">
+                Your fridge list is empty. Add something above.
+              </p>
+            )}
+            <ul className="space-y-2">
+              {items?.map((item) => (
+                <ItemRow key={item.id} item={item} onSave={save} onUse={use} />
+              ))}
+            </ul>
+          </section>
+        </>
+      )}
 
       {undo && (
         <div className="fixed inset-x-0 bottom-0 flex justify-center px-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
