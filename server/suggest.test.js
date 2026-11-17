@@ -165,6 +165,14 @@ test('cooking is all or nothing', async () => {
   assert.equal((await req('POST', '/items/restore', { items: [{ id: 1, name: '' }] })).status, 400);
 });
 
+test('accepts recipes as a bare array without the wrapper', async () => {
+  const f = await stockFridge();
+  reply = [{ title: 'Boiled eggs', uses: [{ id: f.eggs.id, amount: 2 }], steps: ['Boil'] }];
+  const { status, body } = await req('POST', '/suggestions', {});
+  assert.equal(status, 200);
+  assert.deepEqual(body.recipes.map((r) => r.title), ['Boiled eggs']);
+});
+
 test('caps how many items are sent', () => {
   const items = Array.from({ length: 80 }, (_, i) => ({
     id: i + 1,
