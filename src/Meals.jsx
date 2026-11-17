@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { formatAmount } from './api.js';
 import { expiryLabel, expiryStatus } from './dates.js';
+import { CuisineSelect } from './Pantry.jsx';
 
 const backButton = 'rounded-lg px-2 py-1 text-sm font-medium text-teal-800 hover:bg-teal-50';
 
 // Recipe suggestions. state: { loading, error, recipes, itemIds (null = whole fridge) }
-export function MealsView({ state, onBack, onAgain, onTweak, onCook }) {
-  const { loading, error, recipes, itemIds } = state;
+export function MealsView({ state, cuisines, onBack, onAgain, onTweak, onCook, onCuisine }) {
+  const { loading, error, recipes, itemIds, cuisine } = state;
   return (
     <section aria-label="Meal suggestions">
       <div className="mb-4 flex items-center justify-between gap-2">
@@ -17,6 +18,11 @@ export function MealsView({ state, onBack, onAgain, onTweak, onCook }) {
           {itemIds ? `Using ${itemIds.length} picked ${itemIds.length === 1 ? 'item' : 'items'}` : 'Using your whole fridge'}
         </p>
       </div>
+
+      <label className="mb-4 flex items-center gap-3">
+        <span className="shrink-0 text-sm font-medium text-slate-700">Cuisine</span>
+        <CuisineSelect cuisines={cuisines} value={cuisine ?? 'any'} onChange={onCuisine} disabled={loading} />
+      </label>
 
       {loading && (
         <p className="rounded-xl bg-white px-4 py-8 text-center text-slate-600 ring-1 ring-slate-200" role="status">
