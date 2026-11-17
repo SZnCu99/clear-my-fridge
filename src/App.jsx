@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, formatAmount, UNITS } from './api.js';
 import { expiryLabel, expiryStatus, formatDate, todayISO } from './dates.js';
 import { MealsView, PickView } from './Meals.jsx';
+import { PantryView } from './Pantry.jsx';
 
 const byExpiry = (a, b) =>
   a.expires_on.localeCompare(b.expires_on) ||
@@ -16,14 +17,40 @@ export default function App() {
   const [error, setError] = useState('');
   const [undo, setUndo] = useState(null);
   const undoTimer = useRef();
-  const [view, setView] = useState('fridge'); // fridge | meals | pick
+  const [view, setView] = useState('fridge'); // fridge | meals | pick | pantry
   // Last suggestions, kept while moving between screens so going back doesn't cost another call.
-  const [meals, setMeals] = useState({ loading: false, error: '', recipes: null, itemIds: null });
+  const [meals, setMeals] = useState({ loading: false, error: '', recipes: null, itemIds: null, cuisine: null });
   const suggestSeq = useRef(0);
+  const [staples, setStaples] = useState(null);
+  const [cuisines, setCuisines] = useState(null);
+  const [defaultCuisine, setDefaultCuisine] = useState('any');
 
   useEffect(() => {
     api.list().then(setItems).catch((e) => setError(e.message));
+    api.staples().then(setStaples).catch(() => {});
+    api.cuisines().then(setCuisines).catch(() => {});
+    api.settings().then((s) => setDefaultCuisine(s.cuisine)).catch(() => {});
   }, []);
+
+  // Suggestions made with an older pantry or cuisine are stale, so the next tap asks again.
+  const staleMeals = () => setMeals((m) => ({ ...m, recipes: null }));
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  const addStaple = async (name) => {
+    const s = await api.addStaple(name);
+    setStaples((xs) => (xs.some((x) => x.id === s.id) ? xs : [...xs, s].sort(byName)));
+    staleMeals();
+  };
+  const removeStaple = async (s) => {
+    await api.removeStaple(s.id);
+    setStaples((xs) => xs.filter((x) => x.id !== s.id));
+    staleMeals();
+  };
+  const saveCuisine = async (cuisine) => {
+    setDefaultCuisine(cuisine);
+    staleMeals();
+    const saved = await api.saveSettings({ cuisine }).catch((e) => (setError(e.message), null));
+    if (saved) setDefaultCuisine(saved.cuisine);
+  };
 
   const run = async (fn) => {
     setError('');
@@ -76,15 +103,17 @@ export default function App() {
   };
 
   // itemIds: null for the whole fridge (mode 1), or the picked ids (mode 2).
-  const suggest = async (itemIds = null) => {
+  // cuisine: the style for this request (the default cuisine when not given).
+  const suggest = async (itemIds = null, cuisine = defaultCuisine) => {
     const seq = ++suggestSeq.current;
     setView('meals');
-    setMeals({ loading: true, error: '', recipes: null, itemIds });
+    setMeals({ loading: true, error: '', recipes: null, itemIds, cuisine });
     try {
-      const { recipes, item_ids } = await api.suggest(itemIds ?? undefined);
-      if (seq === suggestSeq.current) setMeals({ loading: false, error: '', recipes, itemIds: itemIds ? item_ids : null });
+      const res = await api.suggest(itemIds, cuisine);
+      if (seq === suggestSeq.current)
+        setMeals({ loading: false, error: '', recipes: res.recipes, itemIds: itemIds ? res.item_ids : null, cuisine: res.cuisine });
     } catch (e) {
-      if (seq === suggestSeq.current) setMeals({ loading: false, error: e.message, recipes: null, itemIds });
+      if (seq === suggestSeq.current) setMeals({ loading: false, error: e.message, recipes: null, itemIds, cuisine });
     }
   };
 
@@ -107,7 +136,17 @@ export default function App() {
   return (
     <div className="mx-auto min-h-dvh max-w-xl px-4 pt-[max(1.5rem,env(safe-area-inset-top))] pb-[max(6rem,env(safe-area-inset-bottom))]">
       <header className="mb-5">
-        <h1 className="text-2xl font-bold tracking-tight text-teal-800">Clear My Fridge</h1>
+        <div className="flex items-center justify-between gap-2">
+          <h1 className="text-2xl font-bold tracking-tight text-teal-800">Clear My Fridge</h1>
+          {view !== 'pantry' && (
+            <button
+              onClick={() => setView('pantry')}
+              className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-teal-800 ring-1 ring-teal-700/30 hover:bg-teal-50"
+            >
+              Pantry & cuisine
+            </button>
+          )}
+        </div>
         {items && items.length > 0 && (
           <p className="mt-1 text-sm text-slate-600">
             {items.length} {items.length === 1 ? 'item' : 'items'}
@@ -129,13 +168,26 @@ export default function App() {
         <MealsView
           state={meals}
           onBack={() => setView('fridge')}
-          onAgain={() => suggest(meals.itemIds)}
+          onAgain={() => suggest(meals.itemIds, meals.cuisine)}
+          cuisines={cuisines}
+          onCuisine={(c) => suggest(meals.itemIds, c)}
           onTweak={() => setView('pick')}
           onCook={cook}
         />
       )}
       {view === 'pick' && items && (
-        <PickView items={items} initial={meals.itemIds} onBack={() => setView('meals')} onSuggest={suggest} />
+        <PickView items={items} initial={meals.itemIds} onBack={() => setView('meals')} onSuggest={(ids) => suggest(ids, meals.cuisine ?? defaultCuisine)} />
+      )}
+      {view === 'pantry' && (
+        <PantryView
+          staples={staples}
+          cuisines={cuisines}
+          cuisine={defaultCuisine}
+          onBack={() => setView('fridge')}
+          onAdd={addStaple}
+          onRemove={removeStaple}
+          onCuisine={saveCuisine}
+        />
       )}
 
       {view === 'fridge' && (

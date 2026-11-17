@@ -7,7 +7,22 @@ export const UNITS = ['pcs', 'g', 'kg', 'ml', 'L', 'pack'];
 // Schema versions (PRAGMA user_version):
 //   0 → fresh database, or the first milestone-1 draft with a free-text `quantity` column
 //   1 → `amount` (number) + `unit` (one of UNITS)
-const SCHEMA_VERSION = 1;
+//   2 → `staples` (pantry staples the meal suggestions may assume) + `settings` (key/value)
+const SCHEMA_VERSION = 2;
+
+// What a new pantry starts with. The user edits this list in the app.
+export const DEFAULT_STAPLES = ['Salt', 'Black pepper', 'Cooking oil'];
+
+const CREATE_STAPLES = `
+  CREATE TABLE staples (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT    NOT NULL UNIQUE COLLATE NOCASE
+  );
+  CREATE TABLE settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`;
 
 const CREATE_ITEMS = `
   CREATE TABLE items (
@@ -37,22 +52,31 @@ function migrate(db) {
   if (version >= SCHEMA_VERSION) return;
 
   db.transaction(() => {
-    const cols = db.prepare("SELECT name FROM pragma_table_info('items')").all().map((c) => c.name);
-    if (cols.length === 0) {
-      db.exec(CREATE_ITEMS);
-    } else if (cols.includes('quantity')) {
-      const old = db.prepare('SELECT * FROM items').all();
-      db.exec('DROP INDEX IF EXISTS items_expires_on; ALTER TABLE items RENAME TO items_old;');
-      db.exec(CREATE_ITEMS);
-      const insert = db.prepare(
-        `INSERT INTO items (id, name, amount, unit, expires_on, created_at, updated_at)
-         VALUES (@id, @name, @amount, @unit, @expires_on, @created_at, @updated_at)`
-      );
-      for (const row of old) insert.run({ ...row, ...parseLegacyQuantity(row.quantity) });
-      db.exec('DROP TABLE items_old;');
+    if (version < 1) migrateItems(db);
+    if (version < 2) {
+      db.exec(CREATE_STAPLES);
+      const insert = db.prepare('INSERT INTO staples (name) VALUES (?)');
+      for (const name of DEFAULT_STAPLES) insert.run(name);
     }
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   })();
+}
+
+function migrateItems(db) {
+  const cols = db.prepare("SELECT name FROM pragma_table_info('items')").all().map((c) => c.name);
+  if (cols.length === 0) {
+    db.exec(CREATE_ITEMS);
+  } else if (cols.includes('quantity')) {
+    const old = db.prepare('SELECT * FROM items').all();
+    db.exec('DROP INDEX IF EXISTS items_expires_on; ALTER TABLE items RENAME TO items_old;');
+    db.exec(CREATE_ITEMS);
+    const insert = db.prepare(
+      `INSERT INTO items (id, name, amount, unit, expires_on, created_at, updated_at)
+       VALUES (@id, @name, @amount, @unit, @expires_on, @created_at, @updated_at)`
+    );
+    for (const row of old) insert.run({ ...row, ...parseLegacyQuantity(row.quantity) });
+    db.exec('DROP TABLE items_old;');
+  }
 }
 
 export function openDb(file = process.env.DB_PATH || 'data/fridge.db') {

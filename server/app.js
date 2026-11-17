@@ -1,7 +1,9 @@
 import express from 'express';
 import { UNITS } from './db.js';
 import { LlmError } from './gemini.js';
-import { buildPrompt, localISO, parseRecipes, pickItems } from './suggest.js';
+import { buildPrompt, CUISINES, localISO, parseRecipes, pickItems } from './suggest.js';
+
+const MAX_STAPLES = 100;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_AMOUNT = 100000;
@@ -152,6 +154,21 @@ export function createApp(db, { generate = null, today = () => localISO() } = {}
     for (const row of rows) upsertItem.run(row);
   });
 
+  // Pantry staples and settings
+  const listStaples = db.prepare('SELECT id, name FROM staples ORDER BY name COLLATE NOCASE ASC');
+  const countStaples = db.prepare('SELECT COUNT(*) AS n FROM staples').pluck();
+  const findStaple = db.prepare('SELECT id, name FROM staples WHERE name = ?');
+  const insertStaple = db.prepare('INSERT INTO staples (name) VALUES (?)');
+  const deleteStaple = db.prepare('DELETE FROM staples WHERE id = ?');
+  const getSetting = db.prepare('SELECT value FROM settings WHERE key = ?').pluck();
+  const putSetting = db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  );
+  const settings = () => {
+    const cuisine = getSetting.get('cuisine');
+    return { cuisine: cuisine && CUISINES[cuisine] ? cuisine : 'any' };
+  };
+
   const parseId = (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
@@ -227,7 +244,41 @@ export function createApp(db, { generate = null, today = () => localISO() } = {}
     res.json({ before: result.before, items: listItems.all() });
   });
 
+  app.get('/api/cuisines', (_req, res) => res.json(Object.entries(CUISINES).map(([id, label]) => ({ id, label }))));
+
+  app.get('/api/staples', (_req, res) => res.json(listStaples.all()));
+
+  app.post('/api/staples', (req, res) => {
+    const { value: name, error } = cleanName(req.body?.name);
+    if (error) return res.status(400).json({ error });
+    const existing = findStaple.get(name);
+    if (existing) return res.status(200).json(existing);
+    if (countStaples.get() >= MAX_STAPLES)
+      return res.status(400).json({ error: `You can keep up to ${MAX_STAPLES} pantry staples.` });
+    const { lastInsertRowid } = insertStaple.run(name);
+    res.status(201).json({ id: Number(lastInsertRowid), name });
+  });
+
+  app.delete('/api/staples/:id', (req, res) => {
+    const id = parseId(req, res);
+    if (id === null) return;
+    const { changes } = deleteStaple.run(id);
+    if (!changes) return res.status(404).json({ error: 'Staple not found.' });
+    res.status(204).end();
+  });
+
+  app.get('/api/settings', (_req, res) => res.json(settings()));
+
+  app.patch('/api/settings', (req, res) => {
+    const { cuisine } = req.body ?? {};
+    if (cuisine === undefined) return res.status(400).json({ error: 'Nothing to update.' });
+    if (typeof cuisine !== 'string' || !CUISINES[cuisine]) return res.status(400).json({ error: 'Unknown cuisine.' });
+    putSetting.run('cuisine', cuisine);
+    res.json(settings());
+  });
+
   // Meal suggestions. Body: {} for the whole fridge, or { item_ids: [...] } to cook with only those.
+  // Optional { cuisine } overrides the saved default for this request.
   app.post('/api/suggestions', async (req, res, next) => {
     if (!generate)
       return res.status(503).json({ error: 'Meal suggestions are off. Add GEMINI_API_KEY to .env and restart the server.' });
@@ -239,12 +290,19 @@ export function createApp(db, { generate = null, today = () => localISO() } = {}
       ids = req.body.item_ids;
       if (ids.length === 0) return res.status(400).json({ error: 'Pick at least one ingredient.' });
     }
+    let cuisine = settings().cuisine;
+    if (req.body?.cuisine !== undefined) {
+      if (typeof req.body.cuisine !== 'string' || !CUISINES[req.body.cuisine])
+        return res.status(400).json({ error: 'Unknown cuisine.' });
+      cuisine = req.body.cuisine;
+    }
     const items = pickItems(listItems.all(), today(), ids);
     if (items.length === 0)
       return res.status(400).json({ error: ids ? 'None of those items are in your fridge any more.' : 'Add some unexpired items to your fridge first.' });
 
     try {
-      const text = await generate(buildPrompt(items, { selected: Boolean(ids) }));
+      const staples = listStaples.all().map((s) => s.name);
+      const text = await generate(buildPrompt(items, { selected: Boolean(ids), staples, cuisine }));
       let recipes;
       try {
         recipes = parseRecipes(text, items);
@@ -252,7 +310,7 @@ export function createApp(db, { generate = null, today = () => localISO() } = {}
         console.error('Unusable suggestions:', e.message);
         return res.status(502).json({ error: "The suggestions didn't come back in a usable form. Try again." });
       }
-      res.json({ recipes, item_ids: items.map((i) => i.id) });
+      res.json({ recipes, item_ids: items.map((i) => i.id), cuisine });
     } catch (e) {
       if (!(e instanceof LlmError)) return next(e);
       console.error('Gemini:', e.message);

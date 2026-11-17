@@ -21,6 +21,14 @@ Keep track of what's in your fridge and use things up before they expire.
 - Suggestions come from Google's Gemini 3.1 Flash-Lite on the free tier, and only when you tap the button.
   Only item names, amounts and expiry dates are sent
 
+**Pantry and cuisine** (after milestone 2):
+
+- **Pantry & cuisine** (top right) holds your pantry staples: the condiments and basics you always keep. Meal
+  ideas assume you have only these plus water, and anything else a recipe needs goes under "You'd also need".
+  A new pantry starts with salt, black pepper and cooking oil; tap common staples to add them or type your own
+- Pick a default cuisine (Chinese, Japanese, Italian, Spanish, ... or Any) there, and switch it for a single
+  request from the dropdown on the suggestions screen
+
 Stack: React + Vite + Tailwind (installable PWA) and Node + Express + better-sqlite3.
 
 ## Run it
@@ -69,7 +77,11 @@ a full install until it's served over HTTPS.
 | PATCH | `/api/items/:id` | any of `name`, `amount`, `unit`, `expires_on` |
 | POST | `/api/items/:id/use` | `{ all: true }`, `{ fraction: 0.5 }` or `{ amount: 200 }`; returns `{ item }`, `null` once it's all used |
 | DELETE | `/api/items/:id` | – |
-| POST | `/api/suggestions` | `{}` for the whole fridge, or `{ item_ids: [...] }`; returns `{ recipes: [{ title, minutes, uses: [{ id, name, amount, unit, ... }], missing, steps }], item_ids }` |
+| POST | `/api/suggestions` | `{}` for the whole fridge, or `{ item_ids: [...] }`, plus optional `cuisine`; returns `{ recipes: [{ title, minutes, uses: [{ id, name, amount, unit, ... }], missing, steps }], item_ids, cuisine }` |
+| GET / POST | `/api/staples` | POST `{ name }` adds a pantry staple (an existing name is returned, not duplicated) |
+| DELETE | `/api/staples/:id` | – |
+| GET | `/api/cuisines` | – returns `[{ id, label }]` |
+| GET / PATCH | `/api/settings` | PATCH `{ cuisine }` sets the default cuisine |
 | POST | `/api/cook` | `{ uses: [{ id, amount }] }`, all or nothing; returns `{ before, items }` |
 | POST | `/api/items/restore` | `{ items: [...] }` (the `before` rows from `/api/cook`) puts them back for Undo |
 
