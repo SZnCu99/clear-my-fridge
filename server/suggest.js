@@ -55,7 +55,8 @@ export function parseRecipes(text, items) {
     throw new Error('The model did not return valid JSON.');
   }
   const byId = new Map(items.map((i) => [i.id, i]));
-  const raw = Array.isArray(data?.recipes) ? data.recipes : [];
+  // Gemini sometimes drops the {"recipes": ...} wrapper and returns the bare array.
+  const raw = Array.isArray(data) ? data : Array.isArray(data?.recipes) ? data.recipes : [];
 
   const recipes = [];
   for (const r of raw) {
