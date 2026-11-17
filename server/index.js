@@ -4,10 +4,19 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDb } from './db.js';
 import { createApp } from './app.js';
+import { geminiProvider } from './gemini.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// Load .env (GEMINI_API_KEY etc.) if there is one. Variables already set in the environment win.
+const envFile = path.join(root, '.env');
+if (fs.existsSync(envFile)) process.loadEnvFile(envFile);
 const db = openDb(process.env.DB_PATH || path.join(root, 'data', 'fridge.db'));
-const app = createApp(db);
+const apiKey = process.env.GEMINI_API_KEY?.trim();
+const hasKey = Boolean(apiKey) && apiKey !== 'your-gemini-api-key-here';
+const generate = hasKey ? geminiProvider({ apiKey, model: process.env.GEMINI_MODEL || undefined }) : null;
+if (!generate) console.warn('GEMINI_API_KEY is not set in .env, so meal suggestions are off.');
+const app = createApp(db, { generate });
 
 // In production, serve the built PWA from dist/ (run `npm run build` first).
 const dist = path.join(root, 'dist');
