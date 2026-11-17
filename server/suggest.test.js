@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { openDb } from './db.js';
 import { createApp } from './app.js';
 import { geminiProvider, LlmError } from './gemini.js';
-import { buildPrompt, parseRecipes, pickItems, MAX_ITEMS } from './suggest.js';
+import { buildPrompt, parseRecipes, pickItems, priorityItems, MAX_ITEMS } from './suggest.js';
 
 const TODAY = '2026-11-12';
 let base, server, calls, reply;
@@ -102,7 +102,7 @@ test('checks and ranks what the model sends back', async () => {
   };
   const { status, body } = await req('POST', '/suggestions', {});
   assert.equal(status, 200);
-  assert.deepEqual(body.recipes.map((r) => r.title), ['Chicken traybake', 'Plain rice']); // most expiring items first
+  assert.deepEqual(body.recipes.map((r) => r.title), ['Chicken traybake']); // plain rice uses one item and nothing expiring: dropped
   const tray = body.recipes[0];
   assert.deepEqual(tray.uses.map((u) => [u.name, u.amount]), [
     ['Chicken thighs', 500], // capped at what's there
@@ -171,6 +171,59 @@ test('accepts recipes as a bare array without the wrapper', async () => {
   const { status, body } = await req('POST', '/suggestions', {});
   assert.equal(status, 200);
   assert.deepEqual(body.recipes.map((r) => r.title), ['Boiled eggs']);
+});
+
+test('the prompt names the use-first items and asks for several fridge items per recipe', async () => {
+  await stockFridge();
+  reply = { recipes: [] };
+  await req('POST', '/suggestions', {});
+  const [prompt] = calls;
+  const [first, rest] = prompt.split('Other fridge items:');
+  assert.match(first, /USE FIRST[^\n]*\n- id \d+: Cherry tomatoes[^\n]*\n- id \d+: Chicken thighs/);
+  assert.doesNotMatch(first, /Eggs|Rice/);
+  assert.match(rest, /Eggs/);
+  assert.match(prompt, /MUST use at least one USE FIRST item/);
+  assert.match(prompt, /MUST use at least 2 fridge items/);
+  assert.match(prompt, /Suggest 5 recipes/);
+});
+
+test('drops recipes that skip the expiring items or use only one fridge item', () => {
+  const items = pickItems(
+    [
+      { id: 1, name: 'Chicken', amount: 500, unit: 'g', expires_on: '2026-11-12' },
+      { id: 2, name: 'Spinach', amount: 1, unit: 'pack', expires_on: '2026-11-13' },
+      { id: 3, name: 'Eggs', amount: 6, unit: 'pcs', expires_on: '2026-11-25' },
+      { id: 4, name: 'Rice', amount: 1, unit: 'kg', expires_on: '2027-06-01' },
+      { id: 5, name: 'Cheddar', amount: 200, unit: 'g', expires_on: '2026-12-01' },
+    ],
+    TODAY
+  );
+  const recipe = (title, ...ids) => ({ title, uses: ids.map((id) => ({ id, amount: 1 })), steps: ['Cook'] });
+  const text = JSON.stringify([
+    recipe('Just chicken', 1), // one fridge item
+    recipe('Cheese rice', 4, 5), // nothing expiring soon
+    recipe('Chicken rice', 1, 4),
+    recipe('Chicken and cheese bake', 1, 5, 3),
+    recipe('Spinach omelette', 2, 3, 5),
+  ]);
+  const titles = parseRecipes(text, items).map((r) => r.title);
+  // Chicken expires today so recipes using it rank first, but the second pick covers spinach too.
+  assert.deepEqual(titles, ['Chicken and cheese bake', 'Spinach omelette', 'Chicken rice']);
+});
+
+test('still shows something if every recipe breaks the rules', () => {
+  const items = pickItems([{ id: 1, name: 'Eggs', amount: 6, unit: 'pcs', expires_on: '2026-11-13' }, { id: 2, name: 'Rice', amount: 1, unit: 'kg', expires_on: '2027-06-01' }], TODAY);
+  const text = JSON.stringify({ recipes: [{ title: 'Plain rice', uses: [{ id: 2 }], steps: ['Boil'] }] });
+  assert.deepEqual(parseRecipes(text, items).map((r) => r.title), ['Plain rice']);
+});
+
+test('with nothing expiring soon, the three soonest items count as use-first', () => {
+  const items = pickItems(
+    ['A', 'B', 'C', 'D'].map((name, i) => ({ id: i + 1, name, amount: 1, unit: 'pcs', expires_on: `2026-12-0${i + 1}` })),
+    TODAY
+  );
+  assert.deepEqual(priorityItems(items).map((i) => i.name), ['A', 'B', 'C']);
+  assert.doesNotMatch(buildPrompt(items.slice(0, 1)), /at least 2 fridge items/); // only one item to cook with
 });
 
 test('caps how many items are sent', () => {
