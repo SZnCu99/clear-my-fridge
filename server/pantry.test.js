@@ -126,7 +126,7 @@ test('a milestone-2 database gets the pantry tables and keeps its items', () => 
   old.close();
 
   const db = openDb(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 2);
+  assert.equal(db.pragma('user_version', { simple: true }), 3);
   assert.equal(db.prepare('SELECT name FROM items').get().name, 'Milk');
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM staples').get().n, DEFAULT_STAPLES.length);
   db.close();

@@ -31,6 +31,10 @@ export const api = {
   // uses: [{ id, amount }]. Resolves to { before, items } (before = rows to pass to restore for Undo).
   cook: (uses) => request('POST', '/api/cook', { uses }),
   restore: (items) => request('POST', '/api/items/restore', { items }),
+  // Resolves to { tips: { freezable, steps, keeps_months, thaw, tip }, source: 'ai' | 'builtin' }.
+  freezeTips: (id) => request('POST', `/api/items/${id}/freeze-tips`),
+  // Marks the item frozen today with a new expiry months from now. Resolves to { before, item }.
+  freeze: (id, months) => request('POST', `/api/items/${id}/freeze`, { months }),
 };
 
 export function formatAmount(amount, unit) {
