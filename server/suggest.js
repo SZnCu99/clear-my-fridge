@@ -4,6 +4,27 @@ export const SOON_DAYS = 2; // same rule as the fridge list
 export const MAX_ITEMS = 60;
 export const RECIPE_COUNT = 3;
 
+// Cuisine styles the user can pick. 'any' means no preference.
+export const CUISINES = {
+  any: 'Any',
+  asian: 'Asian (any)',
+  chinese: 'Chinese',
+  japanese: 'Japanese',
+  korean: 'Korean',
+  thai: 'Thai',
+  vietnamese: 'Vietnamese',
+  indian: 'Indian',
+  italian: 'Italian',
+  spanish: 'Spanish',
+  french: 'French',
+  greek: 'Greek',
+  mediterranean: 'Mediterranean',
+  middle_eastern: 'Middle Eastern',
+  mexican: 'Mexican',
+  american: 'American',
+  british: 'British',
+};
+
 export function localISO(d = new Date()) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
@@ -25,15 +46,25 @@ export function pickItems(items, today, ids) {
 
 const daysText = (n) => (n === 0 ? 'expires today' : n === 1 ? 'expires tomorrow' : `expires in ${n} days`);
 
-export function buildPrompt(items, { selected = false } = {}) {
+// staples: names from the user's pantry list. cuisine: a key of CUISINES.
+export function buildPrompt(items, { selected = false, staples = [], cuisine = 'any' } = {}) {
   const lines = items.map((i) => `- id ${i.id}: ${i.name}, ${Number(i.amount.toFixed(2))} ${i.unit}, ${daysText(i.days_left)}`);
+  const pantry = staples.length
+    ? `The person's pantry has only these staples (plus water): ${staples.join(', ')}.`
+    : 'The person has no pantry staples, only water.';
+  const style =
+    cuisine && cuisine !== 'any' && CUISINES[cuisine]
+      ? `\n- Make every recipe ${/^[AEIOU]/.test(CUISINES[cuisine]) ? 'an' : 'a'} ${CUISINES[cuisine]} dish${cuisine === 'asian' ? ' (from any Asian cuisine)' : ''}, using that cuisine's typical flavours and techniques with the ingredients available.`
+      : '';
   return `You suggest simple home-cooked meals that help someone use up what is in their fridge.
 
-${selected ? 'The person picked these items to cook with. Only use these items' : 'Fridge items'} (plus pantry staples):
+${selected ? 'The person picked these items to cook with. Only use these items' : 'Fridge items'} (plus their pantry staples):
 ${lines.join('\n')}
 
+${pantry}
+
 Rules:
-- Assume pantry staples are available: salt, pepper, cooking oil, butter, water, flour, sugar, vinegar, soy sauce and common dried herbs and spices. Never list these as missing.
+- Only assume the pantry staples above and water are available. Any other ingredient that is not in the fridge list, including seasonings, sauces, spices and herbs, must be listed in "missing". Never list the pantry staples as missing.${style}
 - Strongly favour items that expire soonest. Each recipe should use at least one of the items expiring within ${SOON_DAYS} days if there are any.
 - Make the ${RECIPE_COUNT} recipes clearly different from each other.
 - "uses" lists the fridge items the recipe needs, by id, with the amount needed in that item's own unit. Never use more than the amount listed.
