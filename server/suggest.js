@@ -2,7 +2,10 @@
 
 export const SOON_DAYS = 2; // same rule as the fridge list
 export const MAX_ITEMS = 60;
-export const RECIPE_COUNT = 3;
+export const RECIPE_COUNT = 3; // shown to the user
+export const CANDIDATE_COUNT = 5; // asked of the model, so the server can drop ones that break the rules
+export const MIN_FRIDGE_ITEMS = 2; // per recipe, when the fridge has that many
+export const FALLBACK_PRIORITY = 3; // "use first" items when nothing expires within SOON_DAYS
 
 // Cuisine styles the user can pick. 'any' means no preference.
 export const CUISINES = {
@@ -44,11 +47,22 @@ export function pickItems(items, today, ids) {
   return list.slice(0, MAX_ITEMS).map((i) => ({ ...i, days_left: daysBetween(today, i.expires_on) }));
 }
 
+// The items every recipe must use one of: everything expiring within SOON_DAYS,
+// or the few soonest-expiring items if nothing is that close. items are sorted soonest first.
+export function priorityItems(items) {
+  const soon = items.filter((i) => i.days_left <= SOON_DAYS);
+  return soon.length ? soon : items.slice(0, FALLBACK_PRIORITY);
+}
+
 const daysText = (n) => (n === 0 ? 'expires today' : n === 1 ? 'expires tomorrow' : `expires in ${n} days`);
 
 // staples: names from the user's pantry list. cuisine: a key of CUISINES.
 export function buildPrompt(items, { selected = false, staples = [], cuisine = 'any' } = {}) {
-  const lines = items.map((i) => `- id ${i.id}: ${i.name}, ${Number(i.amount.toFixed(2))} ${i.unit}, ${daysText(i.days_left)}`);
+  const line = (i) => `- id ${i.id}: ${i.name}, ${Number(i.amount.toFixed(2))} ${i.unit}, ${daysText(i.days_left)}`;
+  const first = priorityItems(items);
+  const firstIds = new Set(first.map((i) => i.id));
+  const others = items.filter((i) => !firstIds.has(i.id));
+  const minUses = Math.min(MIN_FRIDGE_ITEMS, items.length);
   const pantry = staples.length
     ? `The person's pantry has only these staples (plus water): ${staples.join(', ')}.`
     : 'The person has no pantry staples, only water.';
@@ -58,17 +72,23 @@ export function buildPrompt(items, { selected = false, staples = [], cuisine = '
       : '';
   return `You suggest simple home-cooked meals that help someone use up what is in their fridge.
 
-${selected ? 'The person picked these items to cook with. Only use these items' : 'Fridge items'} (plus their pantry staples):
-${lines.join('\n')}
+${selected ? 'The person picked these items to cook with. Only use these items' : 'Fridge items'} (plus their pantry staples).
 
+USE FIRST (these expire soonest):
+${first.map(line).join('\n')}
+${others.length ? `\nOther fridge items:\n${others.map(line).join('\n')}\n` : ''}
 ${pantry}
 
 Rules:
 - Only assume the pantry staples above and water are available. Any other ingredient that is not in the fridge list, including seasonings, sauces, spices and herbs, must be listed in "missing". Never list the pantry staples as missing.${style}
-- Strongly favour items that expire soonest. Each recipe should use at least one of the items expiring within ${SOON_DAYS} days if there are any.
-- Make the ${RECIPE_COUNT} recipes clearly different from each other.
+- Every recipe MUST use at least one USE FIRST item. Across the recipes, use as many different USE FIRST items as you can, starting with the ones that expire soonest.${
+    minUses > 1
+      ? `\n- Every recipe MUST use at least ${minUses} fridge items, and ideally 3 or more. A dish built around a single fridge item is not acceptable.`
+      : ''
+  }
+- Suggest ${CANDIDATE_COUNT} recipes that are clearly different from each other.
 - "uses" lists the fridge items the recipe needs, by id, with the amount needed in that item's own unit. Never use more than the amount listed.
-- "missing" lists only ingredients the recipe truly needs that are not in the list above and are not pantry staples. Leave out optional extras and garnishes. Prefer recipes with nothing missing.
+- "missing" lists only ingredients the recipe truly needs that are not in the list above and are not pantry staples. Leave out optional extras and garnishes. Using more fridge items matters more than having nothing missing, but keep missing ingredients to one or two.
 - Keep steps short and practical, at most 6 steps.
 
 Reply with JSON only, in exactly this shape:
@@ -120,11 +140,48 @@ export function parseRecipes(text, items) {
   }
   if (recipes.length === 0) throw new Error('The model returned no usable recipes.');
 
-  // Most soon-to-expire items used first, then fewest missing ingredients.
-  const soon = (r) => r.uses.filter((u) => u.days_left <= SOON_DAYS).length;
-  return recipes
+  return chooseRecipes(recipes, items);
+}
+
+// Keeps recipes that follow the rules (one or more "use first" items, enough fridge items), ranks them,
+// and picks RECIPE_COUNT that between them use as many different "use first" items as possible.
+// If the model broke the rules on every recipe, the best of what it sent is returned rather than nothing.
+export function chooseRecipes(recipes, items) {
+  const first = new Set(priorityItems(items).map((i) => i.id));
+  const minUses = Math.min(MIN_FRIDGE_ITEMS, items.length);
+  const firstUsed = (r) => r.uses.filter((u) => first.has(u.id));
+  const urgency = (r) => firstUsed(r).reduce((sum, u) => sum + 1 / (1 + u.days_left), 0);
+  const follows = (r) => firstUsed(r).length > 0 && r.uses.length >= minUses;
+
+  const ranked = recipes
     .map((r, i) => ({ r, i }))
-    .sort((a, b) => soon(b.r) - soon(a.r) || a.r.missing.length - b.r.missing.length || a.i - b.i)
-    .map(({ r }) => r)
-    .slice(0, RECIPE_COUNT);
+    .sort(
+      (a, b) =>
+        follows(b.r) - follows(a.r) ||
+        urgency(b.r) - urgency(a.r) ||
+        b.r.uses.length - a.r.uses.length ||
+        a.r.missing.length - b.r.missing.length ||
+        a.i - b.i
+    )
+    .map(({ r }) => r);
+  const pool = ranked.some(follows) ? ranked.filter(follows) : ranked;
+
+  // Greedy: each pick prefers a recipe that uses "use first" items not covered yet, then the ranking above.
+  const chosen = [];
+  const covered = new Set();
+  const seenTitles = new Set();
+  while (chosen.length < RECIPE_COUNT) {
+    let best = null;
+    let bestNew = -1;
+    for (const r of pool) {
+      if (chosen.includes(r) || seenTitles.has(r.title.toLowerCase())) continue;
+      const fresh = firstUsed(r).filter((u) => !covered.has(u.id)).length;
+      if (fresh > bestNew) [best, bestNew] = [r, fresh];
+    }
+    if (!best) break;
+    chosen.push(best);
+    seenTitles.add(best.title.toLowerCase());
+    firstUsed(best).forEach((u) => covered.add(u.id));
+  }
+  return chosen;
 }
