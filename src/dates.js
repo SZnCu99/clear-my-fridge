@@ -39,3 +39,12 @@ export function formatDate(iso) {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
 }
+
+// YYYY-MM-DD plus whole months, clamped to the end of shorter months (same rule as the server).
+export function addMonthsISO(iso, months) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const last = new Date(y, m - 1 + months + 1, 0).getDate();
+  const t = new Date(y, m - 1 + months, Math.min(d, last));
+  const p = (n) => String(n).padStart(2, '0');
+  return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())}`;
+}

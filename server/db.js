@@ -8,17 +8,19 @@ export const UNITS = ['pcs', 'g', 'kg', 'ml', 'L', 'pack'];
 //   0 → fresh database, or the first milestone-1 draft with a free-text `quantity` column
 //   1 → `amount` (number) + `unit` (one of UNITS)
 //   2 → `staples` (pantry staples the meal suggestions may assume) + `settings` (key/value)
-const SCHEMA_VERSION = 2;
+//   3 → `items.frozen_on` (YYYY-MM-DD the item went in the freezer, or NULL)
+// Steps 2 and 3 check what already exists, since some local databases picked up one change before the other.
+const SCHEMA_VERSION = 3;
 
 // What a new pantry starts with. The user edits this list in the app.
 export const DEFAULT_STAPLES = ['Salt', 'Black pepper', 'Cooking oil'];
 
 const CREATE_STAPLES = `
-  CREATE TABLE staples (
+  CREATE TABLE IF NOT EXISTS staples (
     id   INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT    NOT NULL UNIQUE COLLATE NOCASE
   );
-  CREATE TABLE settings (
+  CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
@@ -31,6 +33,7 @@ const CREATE_ITEMS = `
     amount     REAL    NOT NULL CHECK (amount > 0),
     unit       TEXT    NOT NULL,
     expires_on TEXT    NOT NULL,
+    frozen_on  TEXT,
     created_at TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT    NOT NULL DEFAULT (datetime('now'))
   );
@@ -53,10 +56,15 @@ function migrate(db) {
 
   db.transaction(() => {
     if (version < 1) migrateItems(db);
-    if (version < 2) {
+    if (version < 3) {
+      const hasStaples = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'staples'").get();
       db.exec(CREATE_STAPLES);
-      const insert = db.prepare('INSERT INTO staples (name) VALUES (?)');
-      for (const name of DEFAULT_STAPLES) insert.run(name);
+      if (!hasStaples) {
+        const insert = db.prepare('INSERT INTO staples (name) VALUES (?)');
+        for (const name of DEFAULT_STAPLES) insert.run(name);
+      }
+      const cols = db.prepare("SELECT name FROM pragma_table_info('items')").all().map((c) => c.name);
+      if (!cols.includes('frozen_on')) db.exec('ALTER TABLE items ADD COLUMN frozen_on TEXT;');
     }
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   })();

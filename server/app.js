@@ -1,5 +1,6 @@
 import express from 'express';
 import { UNITS } from './db.js';
+import { addMonths, buildFreezePrompt, clampMonths, curatedTips, parseFreezeTips } from './freeze.js';
 import { LlmError } from './gemini.js';
 import { buildPrompt, CUISINES, localISO, parseRecipes, pickItems } from './suggest.js';
 
@@ -66,6 +67,13 @@ function validate(body, { partial = false } = {}) {
       return { error: 'Expiry date must be a valid date (YYYY-MM-DD).' };
     out.expires_on = b.expires_on;
   }
+  // When the item went in the freezer. Optional: null (or left out) means it isn't frozen.
+  if (b.frozen_on !== undefined || !partial) {
+    const f = b.frozen_on ?? null;
+    if (f !== null && (typeof f !== 'string' || !isRealDate(f)))
+      return { error: 'Frozen date must be a valid date (YYYY-MM-DD).' };
+    out.frozen_on = f;
+  }
   if (partial && Object.keys(out).length === 0) return { error: 'Nothing to update.' };
   return { value: out };
 }
@@ -85,7 +93,7 @@ export function createApp(db, { generate = null, today = () => localISO() } = {}
   const listItems = db.prepare('SELECT * FROM items ORDER BY expires_on ASC, name COLLATE NOCASE ASC, id ASC');
   const getItem = db.prepare('SELECT * FROM items WHERE id = ?');
   const insertItem = db.prepare(
-    'INSERT INTO items (name, amount, unit, expires_on) VALUES (@name, @amount, @unit, @expires_on)'
+    'INSERT INTO items (name, amount, unit, expires_on, frozen_on) VALUES (@name, @amount, @unit, @expires_on, @frozen_on)'
   );
   const deleteItem = db.prepare('DELETE FROM items WHERE id = ?');
   const setAmount = db.prepare("UPDATE items SET amount = ?, updated_at = datetime('now') WHERE id = ?");
@@ -146,9 +154,10 @@ export function createApp(db, { generate = null, today = () => localISO() } = {}
 
   // Put items back exactly as they were (used by Undo after cooking).
   const upsertItem = db.prepare(
-    `INSERT INTO items (id, name, amount, unit, expires_on) VALUES (@id, @name, @amount, @unit, @expires_on)
+    `INSERT INTO items (id, name, amount, unit, expires_on, frozen_on)
+     VALUES (@id, @name, @amount, @unit, @expires_on, @frozen_on)
      ON CONFLICT(id) DO UPDATE SET name = excluded.name, amount = excluded.amount, unit = excluded.unit,
-       expires_on = excluded.expires_on, updated_at = datetime('now')`
+       expires_on = excluded.expires_on, frozen_on = excluded.frozen_on, updated_at = datetime('now')`
   );
   const restore = db.transaction((rows) => {
     for (const row of rows) upsertItem.run(row);
@@ -168,6 +177,12 @@ export function createApp(db, { generate = null, today = () => localISO() } = {}
     const cuisine = getSetting.get('cuisine');
     return { cuisine: cuisine && CUISINES[cuisine] ? cuisine : 'any' };
   };
+  const freezeItem = db.prepare(
+    "UPDATE items SET frozen_on = ?, expires_on = ?, updated_at = datetime('now') WHERE id = ?"
+  );
+  // Freeze tips from the model, by item name, so asking twice doesn't spend another call.
+  const tipsCache = new Map();
+  const TIPS_CACHE_MAX = 200;
 
   const parseId = (req, res) => {
     const id = Number(req.params.id);
@@ -317,6 +332,54 @@ export function createApp(db, { generate = null, today = () => localISO() } = {}
       const [status, message] = LLM_ERRORS[e.kind] ?? [502, "Couldn't get suggestions right now. Try again."];
       res.status(status).json({ error: message });
     }
+  });
+
+  // How to freeze an item. Uses the model when there is one, else (or if it fails) the built-in tips.
+  // Resolves to { tips: { freezable, steps, keeps_months, thaw, tip }, source: 'ai' | 'builtin' }.
+  app.post('/api/items/:id/freeze-tips', async (req, res, next) => {
+    const id = parseId(req, res);
+    if (id === null) return;
+    const item = getItem.get(id);
+    if (!item) return res.status(404).json({ error: 'Item not found.' });
+
+    const key = item.name.toLowerCase();
+    if (tipsCache.has(key)) return res.json({ tips: tipsCache.get(key), source: 'ai' });
+    if (generate) {
+      let text = null;
+      try {
+        text = await generate(buildFreezePrompt(item));
+      } catch (e) {
+        if (!(e instanceof LlmError)) return next(e);
+        console.error('Freeze tips, Gemini:', e.message);
+      }
+      if (text !== null) {
+        try {
+          const tips = parseFreezeTips(text);
+          if (tipsCache.size >= TIPS_CACHE_MAX) tipsCache.delete(tipsCache.keys().next().value);
+          tipsCache.set(key, tips);
+          return res.json({ tips, source: 'ai' });
+        } catch (e) {
+          console.error('Unusable freeze tips:', e.message);
+        }
+      }
+    }
+    res.json({ tips: curatedTips(item.name), source: 'builtin' });
+  });
+
+  // "I froze it": mark the item frozen today and push its expiry out. Body: { months } (1-12, default 3).
+  // Resolves to { before, item } (before = the row to pass to restore for Undo).
+  app.post('/api/items/:id/freeze', (req, res) => {
+    const id = parseId(req, res);
+    if (id === null) return;
+    const before = getItem.get(id);
+    if (!before) return res.status(404).json({ error: 'Item not found.' });
+    if (before.frozen_on) return res.status(409).json({ error: `${before.name} is already in the freezer.` });
+    const months = req.body?.months;
+    if (months !== undefined && !(Number.isInteger(months) && months >= 1 && months <= 12))
+      return res.status(400).json({ error: 'Months must be a whole number from 1 to 12.' });
+    const day = today();
+    freezeItem.run(day, addMonths(day, clampMonths(months)), id);
+    res.json({ before, item: getItem.get(id) });
   });
 
   app.delete('/api/items/:id', (req, res) => {

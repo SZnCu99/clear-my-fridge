@@ -29,6 +29,15 @@ Keep track of what's in your fridge and use things up before they expire.
 - Pick a default cuisine (Chinese, Japanese, Italian, Spanish, ... or Any) there, and switch it for a single
   request from the dropdown on the suggestions screen
 
+**Too lazy to cook? Freeze it:**
+
+- When something expires within 2 days, a **❄ Too lazy to cook? Freeze what's expiring** button lists those items,
+  each with how to freeze it so it keeps its flavour (prep, wrapping, how long it keeps, how to thaw)
+- Any item's **Use** panel also has **Freeze it instead**
+- Tips come from Gemini when a key is set (one small call per ingredient name, cached until the server restarts),
+  otherwise from a built-in list. Things that don't freeze well (salad leaves, cucumber) say so
+- **I froze it** marks the item ❄ Frozen and moves its expiry to when it stops being good in the freezer, with an Undo
+
 Stack: React + Vite + Tailwind (installable PWA) and Node + Express + better-sqlite3.
 
 ## Run it

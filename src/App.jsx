@@ -3,6 +3,7 @@ import { api, formatAmount, UNITS } from './api.js';
 import { expiryLabel, expiryStatus, formatDate, todayISO } from './dates.js';
 import { MealsView, PickView } from './Meals.jsx';
 import { PantryView } from './Pantry.jsx';
+import { FreezePanel, FreezeView, freezeCandidates } from './Freeze.jsx';
 
 const byExpiry = (a, b) =>
   a.expires_on.localeCompare(b.expires_on) ||
@@ -17,7 +18,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [undo, setUndo] = useState(null);
   const undoTimer = useRef();
-  const [view, setView] = useState('fridge'); // fridge | meals | pick | pantry
+  const [view, setView] = useState('fridge'); // fridge | meals | pick | pantry | freeze
   // Last suggestions, kept while moving between screens so going back doesn't cost another call.
   const [meals, setMeals] = useState({ loading: false, error: '', recipes: null, itemIds: null, cuisine: null });
   const suggestSeq = useRef(0);
@@ -90,7 +91,7 @@ export default function App() {
       } else {
         setItems((xs) => xs.filter((x) => x.id !== item.id));
         showUndo(`Used up ${item.name}`, () =>
-          add({ name: item.name, amount: item.amount, unit: item.unit, expires_on: item.expires_on })
+          add({ name: item.name, amount: item.amount, unit: item.unit, expires_on: item.expires_on, frozen_on: item.frozen_on })
         );
       }
     });
@@ -130,6 +131,16 @@ export default function App() {
     }
   };
 
+  // "I froze it": marks the item frozen and pushes its expiry out by `months`, with an Undo.
+  const freeze = (item, months) =>
+    run(async () => {
+      const { before, item: updated } = await api.freeze(item.id, months);
+      setItems((xs) => xs.map((x) => (x.id === item.id ? updated : x)).sort(byExpiry));
+      setMeals((m) => ({ ...m, recipes: null })); // expiry dates changed, so old suggestions are stale
+      showUndo(`Froze ${item.name}`, async () => setItems(await api.restore([before])));
+    });
+
+  const toFreeze = freezeCandidates(items).length;
   const expired = items?.filter((i) => expiryStatus(i.expires_on) === 'expired').length ?? 0;
   const soon = items?.filter((i) => expiryStatus(i.expires_on) === 'soon').length ?? 0;
 
@@ -162,6 +173,14 @@ export default function App() {
             {meals.recipes ? 'See meal suggestions' : 'Suggest meals'}
           </button>
         )}
+        {view === 'fridge' && toFreeze > 0 && (
+          <button
+            onClick={() => setView('freeze')}
+            className="mt-2 w-full rounded-lg bg-white px-4 py-2.5 text-sm font-medium text-sky-800 ring-1 ring-sky-700/30 hover:bg-sky-50"
+          >
+            ❄ Too lazy to cook? Freeze what's expiring ({toFreeze})
+          </button>
+        )}
       </header>
 
       {view === 'meals' && (
@@ -174,6 +193,16 @@ export default function App() {
           onTweak={() => setView('pick')}
           onCook={cook}
         />
+      )}
+      {view === 'freeze' && (
+        <>
+          {error && (
+            <p role="alert" className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">
+              {error}
+            </p>
+          )}
+          <FreezeView items={items} onBack={() => setView('fridge')} onFreeze={freeze} />
+        </>
       )}
       {view === 'pick' && items && (
         <PickView items={items} initial={meals.itemIds} onBack={() => setView('meals')} onSuggest={(ids) => suggest(ids, meals.cuisine ?? defaultCuisine)} />
@@ -209,7 +238,7 @@ export default function App() {
             )}
             <ul className="space-y-2">
               {items?.map((item) => (
-                <ItemRow key={item.id} item={item} onSave={save} onUse={use} />
+                <ItemRow key={item.id} item={item} onSave={save} onUse={use} onFreeze={freeze} />
               ))}
             </ul>
           </section>
@@ -346,6 +375,7 @@ const statusStyles = {
   expired: { row: 'bg-red-50 ring-red-200', badge: 'bg-red-100 text-red-800' },
   soon: { row: 'bg-amber-50 ring-amber-200', badge: 'bg-amber-100 text-amber-900' },
   ok: { row: 'bg-white ring-slate-200', badge: 'bg-slate-100 text-slate-600' },
+  frozen: { row: 'bg-sky-50 ring-sky-200', badge: 'bg-sky-100 text-sky-900' },
 };
 
 const FRACTIONS = [
@@ -354,12 +384,12 @@ const FRACTIONS = [
   ['¼', 1 / 4, 'a quarter'],
 ];
 
-function ItemRow({ item, onSave, onUse }) {
-  const [mode, setMode] = useState('view'); // view | edit | use
+function ItemRow({ item, onSave, onUse, onFreeze }) {
+  const [mode, setMode] = useState('view'); // view | edit | use | freeze
   const [draft, setDraft] = useState(item);
   const [used, setUsed] = useState('');
   const status = expiryStatus(item.expires_on);
-  const s = statusStyles[status];
+  const s = statusStyles[item.frozen_on && status === 'ok' ? 'frozen' : status];
 
   const startEdit = () => {
     setDraft({ ...item, amount: String(item.amount) });
@@ -448,17 +478,20 @@ function ItemRow({ item, onSave, onUse }) {
             <span className="shrink-0 text-sm text-slate-500">{formatAmount(item.amount, item.unit)}</span>
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
+            {item.frozen_on && (
+              <span className="rounded-full bg-sky-100 px-2 py-0.5 font-medium text-sky-900">❄ Frozen</span>
+            )}
             <span className={`rounded-full px-2 py-0.5 font-medium ${s.badge}`}>{expiryLabel(item.expires_on)}</span>
             <span className="text-slate-500">{formatDate(item.expires_on)}</span>
           </div>
         </button>
         <button
-          onClick={() => setMode(mode === 'use' ? 'view' : 'use')}
-          aria-expanded={mode === 'use'}
+          onClick={() => setMode(mode === 'view' ? 'use' : 'view')}
+          aria-expanded={mode !== 'view'}
           className="shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-slate-600 hover:bg-black/5"
           aria-label={`Use ${item.name}`}
         >
-          {mode === 'use' ? 'Close' : 'Use'}
+          {mode === 'view' ? 'Use' : 'Close'}
         </button>
       </div>
 
@@ -506,7 +539,25 @@ function ItemRow({ item, onSave, onUse }) {
               Use
             </button>
           </form>
+          {!item.frozen_on && status !== 'expired' && (
+            <button
+              onClick={() => setMode('freeze')}
+              className="w-full rounded-lg bg-white px-3 py-2 text-sm font-medium text-sky-800 ring-1 ring-sky-700/30 hover:bg-sky-50"
+            >
+              ❄ Not cooking it? Freeze it instead
+            </button>
+          )}
         </div>
+      )}
+      {mode === 'freeze' && (
+        <FreezePanel
+          item={item}
+          onFreeze={async (it, months) => {
+            await onFreeze(it, months);
+            setMode('view');
+          }}
+          onCancel={() => setMode('use')}
+        />
       )}
     </li>
   );
